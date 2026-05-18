@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">Live Wallpaper MVP</string>
+    <string name="wallpaper_description">Interactive local video wallpaper</string>
+</resources>
