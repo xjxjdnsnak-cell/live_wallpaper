@@ -1,4 +1,5 @@
 <resources>
-    <string name="app_name">Live Wallpaper MVP</string>
+    <string name="app_name">LUMINA</string>
+    <string name="wallpaper_service_name">LUMINA Wallpaper</string>
     <string name="wallpaper_description">Interactive local video wallpaper</string>
 </resources>

@@ -1,3 +1,4 @@
+# --- 原有的配置保留 ---
 *.iml
 .gradle
 /local.properties
@@ -12,4 +13,23 @@
 /captures
 .externalNativeBuild
 .cxx
-local.properties
+
+# --- 新增推荐配置 ---
+
+# 1. 忽略整个 .idea 文件夹中除了 vcs.xml 以外的所有个人配置
+# (如果团队需要共享代码风格，可以酌情保留 /codeStyles/)
+/.idea/
+!/.idea/vcs.xml
+
+# 2. 忽略 Gradle Wrapper (如果你的团队不要求统一包装器版本)
+/gradle/
+gradlew
+gradlew.bat
+
+# 3. 确保忽略所有模块下的 build 目录
+app/build/
+*/build/
+
+# 4. 忽略本地生成的签名文件或敏感密钥（如果有）
+*.jks
+*.keystore
