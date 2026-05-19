@@ -8,16 +8,19 @@ import android.view.MotionEvent
 import android.view.SurfaceHolder
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
+import androidx.media3.common.PlaybackException
 import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import com.example.livewallpaper.data.SettingsRepository
 import com.example.livewallpaper.data.WallpaperSettings
+import com.example.livewallpaper.media.VideoFileInspector
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 
@@ -31,6 +34,7 @@ class VideoWallpaperEngine(private val context: Context) {
 
     private var player: ExoPlayer? = null
     private var drawJob: Job? = null
+    private var clipLoopJob: Job? = null
     private var settingsJob: Job? = null
     private var visible: Boolean = false
     private var parallaxX: Float = 0f
@@ -55,11 +59,13 @@ class VideoWallpaperEngine(private val context: Context) {
         if (isVisible) {
             if (!settings.videoUri.isNullOrBlank()) {
                 player?.playWhenReady = true
+                restartClipLoopIfNeeded()
             }
             restartRenderLoopIfNeeded()
         } else {
             player?.pause()
             stopRenderLoop()
+            stopClipLoop()
         }
     }
 
@@ -70,6 +76,7 @@ class VideoWallpaperEngine(private val context: Context) {
 
     fun onTouchEvent(event: MotionEvent) {
         if (!settings.touchEffectEnabled) return
+        if (!settings.videoUri.isNullOrBlank()) return
         if (event.action == MotionEvent.ACTION_DOWN) {
             touchEffect.onTap(event.x, event.y)
         }
@@ -77,6 +84,7 @@ class VideoWallpaperEngine(private val context: Context) {
 
     fun onSurfaceDestroyed() {
         stopRenderLoop()
+        stopClipLoop()
         releasePlayer()
         settingsJob?.cancel()
         settingsJob = null
@@ -108,6 +116,22 @@ class VideoWallpaperEngine(private val context: Context) {
 
         return ExoPlayer.Builder(context).build().also { p ->
             p.repeatMode = Player.REPEAT_MODE_ALL
+            p.addListener(
+                object : Player.Listener {
+                    override fun onPlayerError(error: PlaybackException) {
+                        Log.e(TAG, "Wallpaper video playback failed", error)
+                        scope.launch {
+                            repository.updateLastPlaybackError(VideoFileInspector.playbackErrorSummary())
+                        }
+                    }
+
+                    override fun onPlaybackStateChanged(playbackState: Int) {
+                        if (playbackState == Player.STATE_READY) {
+                            scope.launch { repository.updateLastPlaybackError(null) }
+                        }
+                    }
+                },
+            )
             bindPlayerSurface(p)
             player = p
             applyPlayerSettings(p, settings)
@@ -136,6 +160,7 @@ class VideoWallpaperEngine(private val context: Context) {
         val p = ensurePlayer()
         if (p != null) {
             applyPlayerSettings(p, newSettings)
+            applyClipBounds(p, newSettings)
             if (nextVideoUri != previousVideoUri || nextVideoUri != preparedVideoUri) {
                 prepareVideo(p, nextVideoUri)
             }
@@ -145,6 +170,7 @@ class VideoWallpaperEngine(private val context: Context) {
             parallaxX = 0f
         }
         restartRenderLoopIfNeeded()
+        restartClipLoopIfNeeded()
     }
 
     private fun applyPlayerSettings(p: ExoPlayer, currentSettings: WallpaperSettings) {
@@ -168,11 +194,16 @@ class VideoWallpaperEngine(private val context: Context) {
         try {
             p.setMediaItem(MediaItem.fromUri(Uri.parse(videoUri)))
             p.prepare()
+            settings.startMs?.takeIf { it > 0L }?.let { p.seekTo(it) }
             p.playWhenReady = visible
             preparedVideoUri = videoUri
+            restartClipLoopIfNeeded()
         } catch (t: Throwable) {
             preparedVideoUri = null
             Log.e(TAG, "Failed to play video uri=$videoUri", t)
+            scope.launch {
+                repository.updateLastPlaybackError(VideoFileInspector.playbackErrorSummary())
+            }
         }
     }
 
@@ -198,6 +229,37 @@ class VideoWallpaperEngine(private val context: Context) {
     private fun stopRenderLoop() {
         drawJob?.cancel()
         drawJob = null
+    }
+
+    private fun applyClipBounds(p: ExoPlayer, currentSettings: WallpaperSettings) {
+        val start = currentSettings.startMs ?: 0L
+        val end = currentSettings.endMs
+        if (start > 0L && p.currentPosition < start) {
+            p.seekTo(start)
+        } else if (end != null && end > start && p.currentPosition >= end) {
+            p.seekTo(start)
+        }
+    }
+
+    private fun restartClipLoopIfNeeded() {
+        stopClipLoop()
+        val end = settings.endMs ?: return
+        val start = settings.startMs ?: 0L
+        if (!settingsLoaded || !visible || settings.videoUri.isNullOrBlank() || end <= start) return
+        clipLoopJob = scope.launch {
+            while (visible && !settings.videoUri.isNullOrBlank()) {
+                val p = player
+                if (p != null && p.currentPosition >= end) {
+                    p.seekTo(start)
+                }
+                delay(300)
+            }
+        }
+    }
+
+    private fun stopClipLoop() {
+        clipLoopJob?.cancel()
+        clipLoopJob = null
     }
 
     private fun drawPlaceholder() {
@@ -226,6 +288,7 @@ class VideoWallpaperEngine(private val context: Context) {
         }
         player = null
         preparedVideoUri = null
+        stopClipLoop()
     }
 
     companion object {
