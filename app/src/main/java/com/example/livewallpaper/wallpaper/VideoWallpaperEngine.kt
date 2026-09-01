@@ -15,6 +15,7 @@ import androidx.media3.exoplayer.ExoPlayer
 import com.example.livewallpaper.data.SettingsRepository
 import com.example.livewallpaper.data.WallpaperSettings
 import com.example.livewallpaper.media.VideoFileInspector
+import kotlin.concurrent.Volatile
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -36,8 +37,12 @@ class VideoWallpaperEngine(private val context: Context) {
     private var drawJob: Job? = null
     private var clipLoopJob: Job? = null
     private var settingsJob: Job? = null
+    // Written on the main thread, read from the render loop on Dispatchers.Default:
+    // @Volatile guarantees visibility of the latest write across threads.
+    @Volatile
     private var visible: Boolean = false
     private var parallaxX: Float = 0f
+    @Volatile
     private var settings: WallpaperSettings = WallpaperSettings()
     private var preparedVideoUri: String? = null
     private var settingsLoaded: Boolean = false
@@ -263,8 +268,11 @@ class VideoWallpaperEngine(private val context: Context) {
     }
 
     private fun drawPlaceholder() {
+        // Capture holder once so lock/unlock operate on the same SurfaceHolder even if
+        // onSurfaceDestroyed() nulls the field mid-frame (otherwise unlock could be skipped).
+        val h = holder ?: return
         val canvas: Canvas = try {
-            holder?.lockCanvas()
+            h.lockCanvas()
         } catch (t: Throwable) {
             Log.e(TAG, "lockCanvas failed", t)
             return
@@ -277,7 +285,7 @@ class VideoWallpaperEngine(private val context: Context) {
         } catch (t: Throwable) {
             Log.e(TAG, "draw failed", t)
         } finally {
-            holder?.unlockCanvasAndPost(canvas)
+            h.unlockCanvasAndPost(canvas)
         }
     }
 

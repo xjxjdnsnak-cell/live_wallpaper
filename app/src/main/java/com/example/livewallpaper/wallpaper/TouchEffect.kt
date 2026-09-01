@@ -1,5 +1,7 @@
 package com.example.livewallpaper.wallpaper
 
+import java.util.concurrent.CopyOnWriteArrayList
+
 data class Ripple(
     val x: Float,
     val y: Float,
@@ -10,7 +12,10 @@ data class Ripple(
 )
 
 class TouchEffect {
-    private val ripples = mutableListOf<Ripple>()
+    // CopyOnWriteArrayList: onTap() (main thread) and update()/items() (render loop on
+    // Dispatchers.Default) touch this list concurrently. COW makes add/removeAll atomic and
+    // iteration runs on a snapshot, so no ConcurrentModificationException can occur.
+    private val ripples = CopyOnWriteArrayList<Ripple>()
 
     fun onTap(x: Float, y: Float) {
         ripples += Ripple(x, y)
