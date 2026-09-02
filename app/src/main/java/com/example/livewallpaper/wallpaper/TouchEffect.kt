@@ -31,4 +31,10 @@ class TouchEffect {
     }
 
     fun items(): List<Ripple> = ripples.toList()
+
+    /**
+     * O(1), allocation-free check used by the render loop every tick to decide
+     * whether the placeholder needs redrawing (unlike [items], which copies).
+     */
+    fun hasActiveRipples(): Boolean = ripples.isNotEmpty()
 }

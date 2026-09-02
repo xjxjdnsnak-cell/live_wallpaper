@@ -19,4 +19,16 @@ class TouchEffectTest {
         effect.update(1000)
         assertTrue(effect.items().isEmpty())
     }
+
+    @Test
+    fun hasActiveRipplesTracksLifecycle() {
+        val effect = TouchEffect()
+        assertTrue(!effect.hasActiveRipples())
+
+        effect.onTap(5f, 5f)
+        assertTrue(effect.hasActiveRipples())
+
+        effect.update(1000)
+        assertTrue(!effect.hasActiveRipples())
+    }
 }

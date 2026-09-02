@@ -44,6 +44,12 @@ class VideoWallpaperEngine(private val context: Context) {
     private var parallaxX: Float = 0f
     @Volatile
     private var settings: WallpaperSettings = WallpaperSettings()
+    // Placeholder dirty flag for the no-video render loop. Written on the main thread
+    // (visibility/surface/settings/touch) and read+cleared on Dispatchers.Default;
+    // @Volatile makes the plain writes/reads visible across threads. Starts true so
+    // the first loop iteration draws the placeholder once, then goes idle.
+    @Volatile
+    private var placeholderDirty: Boolean = true
     private var preparedVideoUri: String? = null
     private var settingsLoaded: Boolean = false
 
@@ -56,12 +62,15 @@ class VideoWallpaperEngine(private val context: Context) {
 
     fun onSurfaceChanged() {
         Log.i(TAG, "surface changed")
+        // A (re)created/ resized surface may not hold the previously posted frame.
+        placeholderDirty = true
         player?.let { bindPlayerSurface(it) }
     }
 
     fun onVisibilityChanged(isVisible: Boolean) {
         visible = isVisible
         if (isVisible) {
+            placeholderDirty = true
             if (!settings.videoUri.isNullOrBlank()) {
                 player?.playWhenReady = true
                 restartClipLoopIfNeeded()
@@ -84,6 +93,9 @@ class VideoWallpaperEngine(private val context: Context) {
         if (!settings.videoUri.isNullOrBlank()) return
         if (event.action == MotionEvent.ACTION_DOWN) {
             touchEffect.onTap(event.x, event.y)
+            // A new ripple changes the placeholder content; mark dirty so the idle
+            // loop wakes up on the next tick. @Volatile plain write is fine here.
+            placeholderDirty = true
         }
     }
 
@@ -161,6 +173,11 @@ class VideoWallpaperEngine(private val context: Context) {
         }
         settings = newSettings
         settingsLoaded = true
+        // Settings can affect placeholder content (touch ripples on/off today, any
+        // text/fill-driven change in future). Settings changes are rare user actions,
+        // so conservatively marking dirty costs at most one extra idle-wake frame.
+        // The initial DataStore emission also lands here, guaranteeing the first draw.
+        placeholderDirty = true
 
         val p = ensurePlayer()
         if (p != null) {
@@ -224,8 +241,21 @@ class VideoWallpaperEngine(private val context: Context) {
                 val now = System.currentTimeMillis()
                 val delta = now - last
                 last = now
-                touchEffect.update(delta)
-                drawPlaceholder()
+                // The placeholder content (static rect + text + ripples) only changes
+                // when a redraw was requested or a ripple is animating. While idle we
+                // must not touch the surface at all: the previously posted frame
+                // persists on the software surface, so the placeholder stays visible
+                // without re-locking/posting the canvas every ~16ms (audit P-3).
+                if (placeholderDirty || touchEffect.hasActiveRipples()) {
+                    touchEffect.update(delta)
+                    drawPlaceholder()
+                    if (!touchEffect.hasActiveRipples()) {
+                        // This frame drew with no active ripples: any last ripple
+                        // expired inside update() and this very frame already cleared
+                        // its remnant from the surface. Go idle until dirty again.
+                        placeholderDirty = false
+                    }
+                }
                 kotlinx.coroutines.delay(16)
             }
         }
