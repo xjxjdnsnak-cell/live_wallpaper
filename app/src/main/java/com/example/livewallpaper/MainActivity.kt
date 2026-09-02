@@ -1,7 +1,9 @@
 package com.example.livewallpaper
 
+import android.app.ActivityManager
 import android.app.WallpaperManager
 import android.content.ComponentName
+import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -9,6 +11,7 @@ import android.net.Uri
 import android.os.Bundle
 import android.provider.Settings
 import android.util.Log
+import android.util.LruCache
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -20,7 +23,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
@@ -95,7 +98,12 @@ private fun App(
     val currentRoute = backStackEntry?.destination?.route
     val settings by settingsRepository.settings.collectAsState(initial = WallpaperSettings())
     val libraryState by libraryRepository.state.collectAsState(initial = com.example.livewallpaper.data.WallpaperLibraryState())
-    val thumbnails = remember { mutableStateMapOf<String, Bitmap>() }
+    // Audit P-6: bounded thumbnail cache instead of an unbounded in-memory map.
+    val thumbnails = remember {
+        val activityManager = context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
+        val fromMemoryClass = (activityManager?.memoryClass ?: 0) * 1024 * 1024 / 8
+        ThumbnailCache(if (fromMemoryClass > 0) fromMemoryClass else THUMBNAIL_CACHE_FALLBACK_BYTES)
+    }
     val scope = rememberCoroutineScope()
     val currentItem = libraryState.items.firstOrNull { it.id == libraryState.currentWallpaperId }
         ?: libraryState.items.firstOrNull { it.id == settings.currentWallpaperId }
@@ -161,7 +169,7 @@ private fun App(
                 }
             }
             loaded.forEach { (id, bitmap) ->
-                thumbnails[id] = bitmap
+                thumbnails.put(id, bitmap)
             }
         }
     }
@@ -365,4 +373,50 @@ private fun App(
 private fun generatedOutputName(item: WallpaperItem): String {
     val base = (item.displayName ?: "wallpaper").substringBeforeLast('.', item.displayName ?: "wallpaper")
     return "${base}_${System.currentTimeMillis()}_adapted.mp4"
+}
+
+private const val THUMBNAIL_CACHE_FALLBACK_BYTES = 48 * 1024 * 1024
+
+/**
+ * Size-bounded thumbnail store (audit P-6).
+ *
+ * Backed by [LruCache] capped at a byte budget (sized by the caller from
+ * ActivityManager.memoryClass). It stays a read-only [Map] so all screens keep
+ * indexing it unchanged. Compose invalidation: readers subscribe to [revision]
+ * inside [get], and [put] — the only mutation, hence the only moment eviction
+ * can happen — bumps it, so compositions re-resolve and evicted entries render
+ * the existing placeholder. Evicted bitmaps are recycled; on minSdk 29 their
+ * pixels live on the Java heap anyway, so at worst a GC would have freed them.
+ */
+private class ThumbnailCache(maxBytes: Int) : AbstractMap<String, Bitmap>() {
+    private val revision = mutableStateOf(0)
+    private val cache = object : LruCache<String, Bitmap>(maxBytes) {
+        override fun sizeOf(key: String, value: Bitmap): Int = value.byteCount
+
+        override fun entryRemoved(evicted: Boolean, key: String, oldValue: Bitmap, newValue: Bitmap?) {
+            if (evicted) oldValue.recycle()
+        }
+    }
+
+    override val size: Int
+        get() {
+            revision.value
+            return cache.size()
+        }
+
+    override val entries: Set<Map.Entry<String, Bitmap>>
+        get() {
+            revision.value
+            return cache.snapshot().entries
+        }
+
+    override fun get(key: String): Bitmap? {
+        revision.value // subscribe the reading composition to put/eviction invalidation
+        return cache.get(key)
+    }
+
+    fun put(id: String, bitmap: Bitmap) {
+        cache.put(id, bitmap)
+        revision.value += 1
+    }
 }

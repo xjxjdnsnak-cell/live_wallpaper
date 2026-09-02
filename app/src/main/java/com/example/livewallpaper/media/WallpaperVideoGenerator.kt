@@ -9,8 +9,12 @@ import android.media.MediaMuxer
 import android.net.Uri
 import android.util.Log
 import com.example.livewallpaper.data.WallpaperConfig
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
+import kotlin.coroutines.coroutineContext
 import java.io.File
 import java.nio.ByteBuffer
 import java.util.Locale
@@ -27,8 +31,14 @@ object WallpaperVideoGenerator {
         outputFileName: String,
         onProgress: (VideoGenerationProgress) -> Unit,
     ): VideoGenerationResult = withContext(Dispatchers.IO) {
+        // Audit P-4: throttle per-sample GENERATING callbacks to one per 100ms of
+        // wall-clock; stage transitions (start/saving/completion) always pass through.
+        val throttler = ProgressThrottler()
         val progress = { fraction: Float, message: String, stage: VideoGenerationProgress.Stage ->
-            onProgress(VideoGenerationProgress(fraction.coerceIn(0f, 1f), message, stage))
+            val forced = stage != VideoGenerationProgress.Stage.GENERATING
+            if (throttler.shouldEmit(forced)) {
+                onProgress(VideoGenerationProgress(fraction.coerceIn(0f, 1f), message, stage))
+            }
         }
         progress(0f, "准备中", VideoGenerationProgress.Stage.PREPARING)
 
@@ -56,26 +66,34 @@ object WallpaperVideoGenerator {
         val output = File(outputDir, sanitizeMp4Name(outputFileName))
         if (output.exists()) output.delete()
 
-        val result = runCatching {
-            trimVideoOnlyMp4(context, source, output, startMs, endMs, progress)
-        }.fold(
-            onSuccess = { success ->
-                progress(1f, "已完成", VideoGenerationProgress.Stage.COMPLETED)
-                success
-            },
-            onFailure = { throwable ->
-                Log.e(TAG, "Generate wallpaper copy failed", throwable)
+        try {
+            val result = runCatching {
+                trimVideoOnlyMp4(context, source, output, startMs, endMs, progress)
+            }.fold(
+                onSuccess = { success ->
+                    progress(1f, "已完成", VideoGenerationProgress.Stage.COMPLETED)
+                    success
+                },
+                onFailure = { throwable ->
+                    if (throwable is CancellationException) throw throwable
+                    Log.e(TAG, "Generate wallpaper copy failed", throwable)
+                    runCatching { output.delete() }
+                    VideoGenerationResult.Failure("生成失败，请换一个视频重试", throwable)
+                },
+            )
+            if (result is VideoGenerationResult.Failure) {
                 runCatching { output.delete() }
-                VideoGenerationResult.Failure("生成失败，请换一个视频重试", throwable)
-            },
-        )
-        if (result is VideoGenerationResult.Failure) {
-            runCatching { output.delete() }
+            }
+            result
+        } finally {
+            // Audit P-11: a cancelled remux must not leave a partial output file behind.
+            if (!isActive) {
+                runCatching { output.delete() }
+            }
         }
-        result
     }
 
-    private fun trimVideoOnlyMp4(
+    private suspend fun trimVideoOnlyMp4(
         context: Context,
         source: Uri,
         output: File,
@@ -119,6 +137,8 @@ object WallpaperVideoGenerator {
 
             progress(0.05f, "正在生成", VideoGenerationProgress.Stage.GENERATING)
             while (true) {
+                // Audit P-11: bail out promptly when the caller's coroutine is cancelled.
+                coroutineContext.ensureActive()
                 val sampleTrackIndex = extractor.sampleTrackIndex
                 if (sampleTrackIndex == -1) break
                 if (sampleTrackIndex != videoTrackIndex) {

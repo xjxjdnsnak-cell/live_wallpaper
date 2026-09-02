@@ -30,6 +30,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -61,6 +62,7 @@ import com.example.livewallpaper.media.VideoFileInspector
 import com.example.livewallpaper.media.VideoGenerationProgress
 import com.example.livewallpaper.wallpaper.FillMode
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import kotlin.math.roundToLong
 
@@ -77,7 +79,10 @@ fun WallpaperEditorScreen(
     var config by remember(item?.id) { mutableStateOf(item?.config ?: WallpaperConfig()) }
     val scope = rememberCoroutineScope()
     var isGenerating by remember { mutableStateOf(false) }
-    var generationProgress by remember { mutableStateOf<VideoGenerationProgress?>(null) }
+    // Audit P-4: progress callbacks land here from the IO thread; collectAsState conflates
+    // so only the latest value reaches composition (no per-callback coroutine launch).
+    val generationProgressFlow = remember { MutableStateFlow<VideoGenerationProgress?>(null) }
+    val generationProgress by generationProgressFlow.collectAsState()
     var generationError by remember { mutableStateOf<String?>(null) }
     var generatedItem by remember { mutableStateOf<WallpaperItem?>(null) }
     val durationMs = (item?.durationMs ?: 60_000L).coerceAtLeast(1_000L)
@@ -152,7 +157,7 @@ fun WallpaperEditorScreen(
                                 isGenerating = true
                                 generationError = null
                                 generatedItem = null
-                                generationProgress = VideoGenerationProgress(0f, "准备中", VideoGenerationProgress.Stage.PREPARING)
+                                generationProgressFlow.value = VideoGenerationProgress(0f, "准备中", VideoGenerationProgress.Stage.PREPARING)
                                 val result = runCatching {
                                     onGenerateCopy(
                                         item,
@@ -160,16 +165,16 @@ fun WallpaperEditorScreen(
                                             startMs = startValue.takeIf { it > 0L },
                                             endMs = endValue.takeIf { it < durationMs },
                                         ),
-                                    ) { progress -> scope.launch { generationProgress = progress } }
+                                    ) { progress -> generationProgressFlow.value = progress }
                                 }.getOrElse { Result.failure(it) }
                                 result
                                     .onSuccess {
                                         generatedItem = it
-                                        generationProgress = VideoGenerationProgress(1f, "已完成", VideoGenerationProgress.Stage.COMPLETED)
+                                        generationProgressFlow.value = VideoGenerationProgress(1f, "已完成", VideoGenerationProgress.Stage.COMPLETED)
                                     }
                                     .onFailure {
                                         generationError = it.message ?: "生成失败"
-                                        generationProgress = VideoGenerationProgress(1f, "失败", VideoGenerationProgress.Stage.FAILED)
+                                        generationProgressFlow.value = VideoGenerationProgress(1f, "失败", VideoGenerationProgress.Stage.FAILED)
                                     }
                                 isGenerating = false
                             }
@@ -178,7 +183,7 @@ fun WallpaperEditorScreen(
                         onSetGeneratedCurrent = onSetGeneratedCurrent,
                         onContinueEditing = {
                             generatedItem = null
-                            generationProgress = null
+                            generationProgressFlow.value = null
                             generationError = null
                         },
                     )
